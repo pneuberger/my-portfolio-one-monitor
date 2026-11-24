@@ -26,13 +26,14 @@
       <span id="regime-name" class="regime-name">–</span>
     </div>
     <div class="big" id="dd">–</div>
-    <div class="muted" id="dd-sub">below all-time high</div>
+    <div class="muted" id="dd-sub">vs 3-year high</div>
     <dl class="stats">
       <div><dt>Close</dt><dd id="close">–</dd></div>
-      <div><dt>ATH</dt><dd id="ath">–</dd></div>
-      <div><dt>Crisis (−20%)</dt><dd id="lvl-crisis">–</dd></div>
-      <div><dt>Escalation (−40%)</dt><dd id="lvl-esc">–</dd></div>
+      <div><dt>3-year high</dt><dd id="high3y">–</dd></div>
+      <div><dt>3-year low</dt><dd id="low3y">–</dd></div>
+      <div id="anchor-box" hidden><dt>Crisis start level</dt><dd id="anchor">–</dd></div>
     </dl>
+    <div id="triggers" class="triggers"></div>
     <div id="target" class="target"></div>
     <div id="data-warning" class="warning" hidden></div>
   </section>
@@ -47,7 +48,7 @@
       </div>
     </div>
     <div class="chart-box"><canvas id="chart-index"></canvas></div>
-    <h2 class="sub">Drawdown</h2>
+    <h2 class="sub">Drawdown vs 3-year high</h2>
     <div class="chart-box small"><canvas id="chart-dd"></canvas></div>
   </section>
 

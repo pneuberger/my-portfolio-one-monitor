@@ -41,18 +41,28 @@ async function load() {
 }
 
 // ---------- regime card ----------
+const LABEL = { normal: "Normal", crisis: "Crisis", escalation: "Escalation" };
+
 function renderRegime() {
   const d = DATA;
   $("updated").textContent = d.close_date ? `Close ${d.close_date}` : "";
   if (!d.regime) return;
   document.documentElement.style.setProperty("--regime", `var(--${d.regime})`);
   $("regime-name").textContent = d.regime_label;
-  $("dd").textContent = `−${pct(d.drawdown)}`;
-  $("dd-sub").textContent = `below all-time high · since ${d.regime_since || "–"}`;
+  $("dd").textContent = `${d.drawdown > 0 ? "−" : ""}${pct(d.drawdown)}`;
+  $("dd-sub").textContent = `vs 3-year high · ${d.regime_label} since ${d.regime_since || "–"}`;
   $("close").textContent = fmt(d.close, 2);
-  $("ath").innerHTML = `${fmt(d.ath, 2)}<br><span class="muted small-text">${d.ath_date}</span>`;
-  $("lvl-crisis").textContent = fmt(d.levels.crisis, 0);
-  $("lvl-esc").textContent = fmt(d.levels.escalation, 0);
+  $("high3y").innerHTML = `${fmt(d.high3y, 2)}<br><span class="muted small-text">${d.high3y_date}</span>`;
+  $("low3y").innerHTML = `${fmt(d.low3y, 2)} <span class="muted small-text">(+${pct(d.rise)})</span><br><span class="muted small-text">${d.low3y_date}</span>`;
+  const anchorBox = $("anchor-box");
+  anchorBox.hidden = !d.anchor;
+  if (d.anchor) $("anchor").innerHTML = `${fmt(d.anchor, 2)} <span class="muted small-text">(${d.close >= d.anchor ? "+" : "−"}${pct(Math.abs(d.close / d.anchor - 1))})</span>`;
+  $("triggers").innerHTML = `<div class="label">Next regime change</div>` + d.levels.map((lv) => {
+    const dist = lv.level / d.close - 1;
+    return `<div class="kv"><span><span class="pill ${lv.to}">${LABEL[lv.to]}</span> if close ${lv.op} <strong>${fmt(lv.level, 0)}</strong></span>
+      <span class="muted">${dist >= 0 ? "+" : "−"}${pct(Math.abs(dist))} away</span></div>
+      <div class="muted small-text trig-basis">${lv.pct > 0 ? "+" : "−"}${fmt(Math.abs(lv.pct) * 100)}% vs ${lv.basis} ${fmt(lv.basis_level, 0)}</div>`;
+  }).join("");
   const t = d.allocations[d.regime];
   $("target").textContent = "Target: " + d.assets.map((a) => `${d.asset_labels[a]} ${t[a]}%`).join(" · ");
   if (d.failed_fetches > 0) {
@@ -63,12 +73,43 @@ function renderRegime() {
 }
 
 // ---------- charts ----------
+// Rolling window (t - days, t] with monotonic deques, same as pandas rolling("1096D").
+function rollingExtremes(dates, closes, days) {
+  const n = closes.length, hi = new Array(n), lo = new Array(n);
+  const t = dates.map((x) => Date.parse(x) / 86400000);
+  const qh = [], ql = [];
+  let hh = 0, hl = 0;
+  for (let i = 0; i < n; i++) {
+    while (qh.length > hh && closes[qh[qh.length - 1]] <= closes[i]) qh.pop();
+    qh.push(i);
+    while (t[qh[hh]] <= t[i] - days) hh++;
+    while (ql.length > hl && closes[ql[ql.length - 1]] >= closes[i]) ql.pop();
+    ql.push(i);
+    while (t[ql[hl]] <= t[i] - days) hl++;
+    hi[i] = closes[qh[hh]];
+    lo[i] = closes[ql[hl]];
+  }
+  return { hi, lo };
+}
+
+let ROLL = null;
+function regimeArray() {
+  const n = DATA.series.closes.length, out = new Array(n);
+  const seg = DATA.regime_segments || [[0, DATA.regime, null]];
+  for (let s = 0; s < seg.length; s++) {
+    const end = s + 1 < seg.length ? seg[s + 1][0] : n;
+    for (let i = seg[s][0]; i < end; i++) out[i] = seg[s][1];
+  }
+  return out;
+}
+
 function sliceRange(years) {
   const { dates, closes } = DATA.series;
-  // Running ATH over the full history, so drawdown is correct for any window.
-  const ath = new Array(closes.length);
-  let m = -Infinity;
-  for (let i = 0; i < closes.length; i++) { m = Math.max(m, closes[i]); ath[i] = m; }
+  if (!ROLL) {
+    ROLL = rollingExtremes(dates, closes, Math.round(365.25 * DATA.rules.window_years));
+    ROLL.regime = regimeArray();
+  }
+  const { hi, lo, regime } = ROLL;
   let start = 0;
   if (years > 0) {
     const cut = new Date(dates[dates.length - 1]);
@@ -78,30 +119,40 @@ function sliceRange(years) {
   }
   const n = dates.length - start;
   const step = Math.max(1, Math.ceil(n / MAX_POINTS));
-  const out = { labels: [], close: [], ath: [], dd: [] };
+  const out = { labels: [], close: [], hi: [], lo: [], dd: [], regime: [] };
+  const push = (j) => {
+    out.labels.push(dates[j]); out.close.push(closes[j]); out.hi.push(hi[j]); out.lo.push(lo[j]);
+    out.dd.push(closes[j] / hi[j] - 1); out.regime.push(regime[j]);
+  };
   for (let i = start; i < dates.length; i += step) {
-    // Keep the lowest close inside each bucket so crashes are not smoothed away.
+    // Keep the deepest point inside each bucket so crashes are not smoothed away.
     let j = i;
-    for (let k = i; k < Math.min(i + step, dates.length); k++) if (closes[k] / ath[k] < closes[j] / ath[j]) j = k;
-    out.labels.push(dates[j]); out.close.push(closes[j]); out.ath.push(ath[j]); out.dd.push(closes[j] / ath[j] - 1);
+    for (let k = i; k < Math.min(i + step, dates.length); k++) if (closes[k] / hi[k] < closes[j] / hi[j]) j = k;
+    push(j);
   }
-  const last = dates.length - 1;
-  if (out.labels[out.labels.length - 1] !== dates[last]) {
-    out.labels.push(dates[last]); out.close.push(closes[last]); out.ath.push(ath[last]); out.dd.push(closes[last] / ath[last] - 1);
-  }
+  if (out.labels[out.labels.length - 1] !== dates[dates.length - 1]) push(dates.length - 1);
   return out;
 }
 
-const bandsPlugin = {
-  id: "bands",
+// Shades Crisis/Escalation periods behind the lines.
+const regimeBgPlugin = {
+  id: "regimeBg",
   beforeDatasetsDraw(chart, _args, opts) {
-    if (!opts || !opts.bands) return;
-    const { ctx, chartArea: a, scales: { y } } = chart;
+    if (!opts || !opts.regime) return;
+    const { ctx, chartArea: a, scales: { x } } = chart;
+    const reg = opts.regime, n = reg.length;
+    const half = n > 1 ? (x.getPixelForValue(1) - x.getPixelForValue(0)) / 2 : 0;
     ctx.save();
-    for (const b of opts.bands) {
-      const top = y.getPixelForValue(b.from), bottom = y.getPixelForValue(b.to);
-      ctx.fillStyle = b.color;
-      ctx.fillRect(a.left, Math.max(a.top, top), a.right - a.left, Math.min(a.bottom, bottom) - Math.max(a.top, top));
+    let i = 0;
+    while (i < n) {
+      let j = i;
+      while (j + 1 < n && reg[j + 1] === reg[i]) j++;
+      if (reg[i] !== "normal" && opts.colors[reg[i]]) {
+        const x0 = Math.max(a.left, x.getPixelForValue(i) - half), x1 = Math.min(a.right, x.getPixelForValue(j) + half);
+        ctx.fillStyle = opts.colors[reg[i]];
+        ctx.fillRect(x0, a.top, x1 - x0, a.bottom - a.top);
+      }
+      i = j + 1;
     }
     ctx.restore();
   },
@@ -116,14 +167,13 @@ function alpha(color, a) {
 function renderCharts() {
   if (!DATA.series || typeof Chart === "undefined") return;
   const r = sliceRange(prefs.range);
-  const th = DATA.thresholds;
   const accent = cssVar("--accent"), muted = cssVar("--muted"), line = cssVar("--line");
-  const cCrisis = cssVar("--crisis"), cEsc = cssVar("--escalation");
+  const colors = { crisis: cssVar("--crisis"), escalation: cssVar("--escalation"), normal: cssVar("--normal") };
+  const bg = { regime: r.regime, colors: { crisis: alpha(colors.crisis, 0.16), escalation: alpha(colors.escalation, 0.18) } };
   Chart.defaults.color = muted;
   Chart.defaults.borderColor = line;
   Chart.defaults.font.family = "system-ui, sans-serif";
 
-  const athNow = DATA.ath;
   const flat = (v) => r.labels.map(() => v);
   const common = {
     responsive: true, maintainAspectRatio: false, animation: false,
@@ -133,38 +183,41 @@ function renderCharts() {
   };
 
   Object.values(charts).forEach((c) => c.destroy());
+  const triggerSets = (DATA.levels || []).map((lv) => ({
+    label: `${LABEL[lv.to]} ${lv.op === "below" ? "<" : ">"} ${fmt(lv.level, 0)}`, data: flat(lv.level),
+    borderColor: colors[lv.to], borderDash: [6, 3], borderWidth: 1.2,
+  }));
   charts.index = new Chart($("chart-index"), {
     type: "line",
     data: {
       labels: r.labels,
       datasets: [
         { label: "Close", data: r.close, borderColor: accent, backgroundColor: accent },
-        { label: "ATH", data: r.ath, borderColor: muted, borderDash: [4, 3], borderWidth: 1 },
-        { label: `−${th.crisis * 100}%`, data: flat(athNow * (1 - th.crisis)), borderColor: cCrisis, borderDash: [2, 3], borderWidth: 1 },
-        { label: `−${th.escalation * 100}%`, data: flat(athNow * (1 - th.escalation)), borderColor: cEsc, borderDash: [6, 3], borderWidth: 1 },
+        { label: "3y high", data: r.hi, borderColor: muted, borderDash: [4, 3], borderWidth: 1 },
+        { label: "3y low", data: r.lo, borderColor: muted, borderDash: [1, 3], borderWidth: 1 },
+        ...triggerSets,
       ],
     },
-    options: { ...common, plugins: { legend: { labels: { boxWidth: 12, boxHeight: 2 } },
+    options: { ...common, plugins: { legend: { labels: { boxWidth: 12, boxHeight: 2 } }, regimeBg: bg,
       tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${fmt(c.parsed.y, 0)}` } } } },
+    plugins: [regimeBgPlugin],
   });
 
+  const th = DATA.rules.normal_to_crisis_drop_from_3y_high;
   const minDd = Math.min(-0.5, Math.min(...r.dd) - 0.05);
   charts.dd = new Chart($("chart-dd"), {
     type: "line",
-    data: { labels: r.labels, datasets: [{ label: "Drawdown", data: r.dd, borderColor: accent, backgroundColor: alpha(accent, 0.25), fill: "origin" }] },
+    data: { labels: r.labels, datasets: [
+      { label: "vs 3y high", data: r.dd, borderColor: accent, backgroundColor: alpha(accent, 0.25), fill: "origin" },
+      { label: `−${th * 100}%`, data: flat(-th), borderColor: colors.crisis, borderDash: [2, 3], borderWidth: 1 },
+    ] },
     options: {
       ...common,
       scales: { ...common.scales, y: { min: minDd, max: 0.02, ticks: { callback: (v) => `${Math.round(v * 100)}%` } } },
-      plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: { label: (c) => `Drawdown: ${pct(c.parsed.y)}` } },
-        bands: { bands: [
-          { from: -th.crisis, to: -th.escalation, color: alpha(cCrisis, 0.14) },
-          { from: -th.escalation, to: minDd, color: alpha(cEsc, 0.14) },
-        ] },
-      },
+      plugins: { legend: { display: false }, regimeBg: bg,
+        tooltip: { callbacks: { label: (c) => `${c.dataset.label}: ${pct(c.parsed.y)}` } } },
     },
-    plugins: [bandsPlugin],
+    plugins: [regimeBgPlugin],
   });
 
   document.querySelectorAll("#range button").forEach((b) => b.classList.toggle("on", +b.dataset.range === prefs.range));
@@ -268,12 +321,11 @@ let histAll = false;
 function renderHistory() {
   const ev = ((DATA.events || {})[prefs.hist] || []).slice().reverse();
   const list = $("history");
-  const label = { normal: "Normal", crisis: "Crisis", escalation: "Escalation" };
   const shown = histAll ? ev : ev.slice(0, HIST_LIMIT);
   list.innerHTML = shown.length ? shown.map((e) => `
-    <li><span>${e.date}</span>
-      <span><span class="pill ${e.from}">${label[e.from]}</span> → <span class="pill ${e.to}">${label[e.to]}</span></span>
-      <span class="muted">−${pct(e.drawdown)}</span></li>`).join("")
+    <li><div class="hist-top"><span>${e.date}</span>
+      <span><span class="pill ${e.from}">${LABEL[e.from]}</span> → <span class="pill ${e.to}">${LABEL[e.to]}</span></span></div>
+      ${e.trigger ? `<div class="muted small-text">${e.trigger}</div>` : ""}</li>`).join("")
     : `<li class="muted">${prefs.hist === "live" ? "No live signals yet." : "No events."}</li>`;
   $("hist-more").hidden = histAll || ev.length <= HIST_LIMIT;
   $("hist-more").textContent = `Show all ${ev.length}`;

@@ -7,13 +7,13 @@ import pandas as pd
 import pytest
 
 from src import backtest, refill as rf
-from src.check import default_state, evaluate
+from src.check import RULES_VERSION, default_state, evaluate
 from src.data import drop_incomplete, fetch_history
-from src.regime import classify, drawdown, transition
+from src.regime import regime_path, rolling_extremes, transition, trigger_levels
 
 CFG = {**json.loads((Path(__file__).resolve().parent.parent / "config.json").read_text()),
        "portfolio_value_eur": 40000, "monthly_contribution_eur": 800}
-TH = CFG["thresholds"]
+RULES = CFG["rules"]
 
 
 def df_of(closes, start="2024-01-01"):
@@ -31,49 +31,99 @@ def run(closes, state, today=date(2025, 3, 20), ok=True, err=None):
 def state_in(regime):
     s = default_state()
     s["last_notified_regime"] = regime
+    s["rules_version"] = RULES_VERSION
     return s
 
 
-# --- classification and boundaries -------------------------------------------------
-
-@pytest.mark.parametrize("close,expected", [
-    (100, "normal"), (80.01, "normal"), (80, "crisis"), (70, "crisis"),
-    (60, "crisis"), (59.99, "escalation"), (30, "escalation"),
-])
-def test_boundaries(close, expected):
-    assert classify(drawdown(close, 100.0), TH) == expected
+def regimes(closes, start="2024-01-01"):
+    return list(regime_path(df_of(closes, start), RULES).df["regime"])
 
 
-def test_ath_is_max_close_not_last():
-    msgs = run([100, 120, 96], default_state())  # 96/120 = -20% exactly
-    assert "Crisis" in msgs[0].title
+# --- the four book transitions, strict boundaries -----------------------------------
+
+def test_normal_to_crisis_strictly_more_than_20pct_below_3y_high():
+    assert regimes([100, 80])[-1] == "normal"        # exactly -20% is not "more than 20%"
+    assert regimes([100, 79.99])[-1] == "crisis"
 
 
-# --- transitions --------------------------------------------------------------------
-
-DOWN = [("normal", "crisis"), ("crisis", "escalation"), ("normal", "escalation")]
-UP = [("escalation", "crisis"), ("crisis", "normal"), ("escalation", "normal")]
-LEVEL = {"normal": 100, "crisis": 70, "escalation": 50}
-
-
-@pytest.mark.parametrize("old,new", DOWN)
-def test_downward_crossings(old, new):
-    s = state_in(old)
-    msgs = run([100, LEVEL[new]], s)
-    assert kinds(msgs) == ["regime_down"]
-    assert msgs[0].priority == "high"
-    assert s["last_notified_regime"] == new
-    assert not s["refill"]["active"]
+def test_crisis_to_escalation_25pct_below_anchor_not_high():
+    # Anchor = 79 (close on the day Crisis started). 0.75 * 79 = 59.25
+    assert regimes([100, 79, 59.25])[-1] == "crisis"
+    assert regimes([100, 79, 59.24])[-1] == "escalation"
+    # 61 is -39% vs the high but only -22.8% vs the anchor -> still Crisis
+    assert regimes([100, 79, 61])[-1] == "crisis"
 
 
-@pytest.mark.parametrize("old,new,gap", [("escalation", "crisis", 4000), ("crisis", "normal", 4000),
-                                         ("escalation", "normal", 8000)])
-def test_upward_crossings_start_refill(old, new, gap):
-    s = state_in(old)
-    msgs = run([100, LEVEL[new]], s)
-    assert kinds(msgs) == ["regime_up"]
-    assert s["refill"]["active"] and rf.amounts(s["refill"], CFG)[0] == gap
-    assert "no sales" in msgs[0].body
+def test_escalation_to_crisis_50pct_above_3y_low():
+    # 3y low = 59 -> 1.5 * 59 = 88.5
+    assert regimes([100, 79, 59, 88.5])[-1] == "escalation"
+    assert regimes([100, 79, 59, 88.51])[-1] == "crisis"
+
+
+def test_crisis_to_normal_25pct_above_anchor():
+    # Anchor 79 -> 1.25 * 79 = 98.75
+    assert regimes([100, 79, 98.75])[-1] == "crisis"
+    assert regimes([100, 79, 98.76])[-1] == "normal"
+
+
+def test_hysteresis_stays_crisis_on_partial_recovery():
+    # Back to -10% vs the high, but not +25% vs the anchor -> still Crisis
+    assert regimes([100, 79, 85, 90]) == ["normal", "crisis", "crisis", "crisis"]
+
+
+def test_full_cycle_and_anchor_reset():
+    path = regime_path(df_of([100, 79, 59, 89, 70, 112]), RULES)
+    assert list(path.df["regime"]) == ["normal", "crisis", "escalation", "crisis", "crisis", "normal"]
+    assert [e["to"] for e in path.events] == ["crisis", "escalation", "crisis", "normal"]
+    # Re-entering Crisis from Escalation resets the anchor to 89:
+    # 70 is -21% vs 89 (no Escalation), 112 is +25.8% vs 89 (Normal).
+    assert list(path.df["anchor"])[3:5] == [89.0, 89.0]
+    assert path.events[1]["reference"] == "Crisis start" and path.events[2]["reference"] == "3y low"
+
+
+def test_trigger_levels_per_regime():
+    lv = trigger_levels("normal", 100, 60, None, RULES)
+    assert [(x["to"], x["op"], round(x["level"], 2)) for x in lv] == [("crisis", "below", 80.0)]
+    lv = trigger_levels("crisis", 100, 60, 79, RULES)
+    assert [(x["to"], round(x["level"], 2)) for x in lv] == [("escalation", 59.25), ("normal", 98.75)]
+    lv = trigger_levels("escalation", 100, 59, None, RULES)
+    assert [(x["to"], round(x["level"], 2)) for x in lv] == [("crisis", 88.5)]
+
+
+# --- 3-year window --------------------------------------------------------------------
+
+def test_window_is_three_years_including_today():
+    df = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=1200, freq="D"),
+                       "close": [float(i) for i in range(1200)]})
+    ext = rolling_extremes(df, 3)
+    assert ext["high3y"].iloc[-1] == 1199          # today included
+    assert ext["low3y"].iloc[-1] == 1199 - 1095    # 1096-day window
+
+
+def test_old_high_rolls_out_of_window():
+    # 100, then 4 years at 85 (-15%, Normal), then 79: vs the 3y high (85) that is only -7%.
+    closes = [100] + [85] * (4 * 261) + [79]
+    assert regimes(closes)[-1] == "normal"
+    # Same drop within 3 years of the high -> Crisis
+    closes = [100] + [85] * (2 * 261) + [79]
+    assert regimes(closes)[-1] == "crisis"
+
+
+# --- notifications ------------------------------------------------------------------
+
+def test_downward_alert_crisis():
+    s = state_in("normal")
+    msgs = run([100, 79], s)
+    assert kinds(msgs) == ["regime_down"] and msgs[0].priority == "high"
+    assert "-21.0% vs 3y high 100.00" in msgs[0].body
+    assert s["last_notified_regime"] == "crisis"
+
+
+def test_upward_alert_starts_refill():
+    s = state_in("escalation")
+    msgs = run([100, 79, 59, 89], s)
+    assert kinds(msgs) == ["regime_up"] and "no sales" in msgs[0].body
+    assert s["refill"]["active"] and rf.amounts(s["refill"], CFG)[0] == 4000
 
 
 def test_deltas_normal_to_crisis():
@@ -83,34 +133,33 @@ def test_deltas_normal_to_crisis():
 
 
 def test_no_change_no_message():
-    s = state_in("normal")
-    assert run([100, 95], s) == []
+    assert run([100, 95], state_in("normal")) == []
 
-
-# --- first run, missed days, state ----------------------------------------------------
 
 def test_first_run_sends_started_only():
     s = default_state()
-    msgs = run([100, 70], s)
+    msgs = run([100, 79], s)
     assert kinds(msgs) == ["started"]
-    assert s["last_notified_regime"] == "crisis"
+    assert s["last_notified_regime"] == "crisis" and s["rules_version"] == RULES_VERSION
+    assert "Escalation if close below 59" in msgs[0].body
+
+
+def test_rules_change_restarts_instead_of_crossing_alert():
+    s = state_in("normal")
+    s["rules_version"] = None  # state written by the old ATH rules
+    msgs = run([100, 79], s)
+    assert kinds(msgs) == ["restarted"]
+    assert s["last_notified_regime"] == "crisis" and s["rules_version"] == RULES_VERSION
     assert not s["refill"]["active"]
 
 
-def test_compares_with_last_notified_not_yesterday():
-    # Missed days: the series went Normal -> Crisis -> Escalation while we were not running.
+def test_missed_days_one_alert_with_all_triggers():
     s = state_in("normal")
-    msgs = run([100, 75, 55], s)
+    s["last_close_date"] = "2024-01-01"
+    msgs = run([100, 79, 59], s)   # Normal -> Crisis -> Escalation while not running
     assert kinds(msgs) == ["regime_down"]
     assert "Normal -> Escalation" in msgs[0].title
-
-
-def test_bounce_alerts_every_crossing():
-    s = state_in("normal")
-    assert kinds(run([100, 79], s)) == ["regime_down"]
-    assert kinds(run([100, 79, 81], s)) == ["regime_up"]
-    assert kinds(run([100, 79, 81, 80], s)) == ["regime_down"]
-    assert not s["refill"]["active"]  # the downward crossing cancelled the refill
+    assert msgs[0].body.count("on 2024-01-0") == 2
 
 
 # --- refill ------------------------------------------------------------------------
@@ -216,11 +265,11 @@ def test_drop_incomplete_today_bar():
 
 # --- backtest ----------------------------------------------------------------------
 
-def test_backtest_uses_running_ath():
-    ev = backtest.regime_events(df_of([100, 75, 55, 70, 85, 130, 100]), TH)
+def test_backtest_matches_live_engine():
+    ev = backtest.regime_events(df_of([100, 79, 59, 89, 112]), RULES)
     assert [(e["from"], e["to"]) for e in ev] == [
-        ("normal", "crisis"), ("crisis", "escalation"), ("escalation", "crisis"),
-        ("crisis", "normal"), ("normal", "crisis")]
+        ("normal", "crisis"), ("crisis", "escalation"), ("escalation", "crisis"), ("crisis", "normal")]
+    assert all(e["source"] == "backtest" for e in ev)
 
 
 def test_expected_close_date():

@@ -1,22 +1,38 @@
 # My Portfolio One Monitor
 
-Watches the **MSCI World USD price index** (`^990100-USD-STRD`) every trading day. It works out the regime from the drawdown versus the last all-time high, and sends **ntfy push notifications** (with a chart) to an Android phone when an action is due under the configured rules. A **PWA dashboard** on GitHub Pages shows the regime, charts, allocation vs. target and refill progress.
+Watches the **MSCI World USD price index** (`^990100-USD-STRD`) every trading day. It works out the portfolio regime with the rules from *Erfolgreich wissenschaftlich investieren*, and sends **ntfy push notifications** (with a chart) to an Android phone when an action is due under the configured rules. A **PWA dashboard** on GitHub Pages shows the regime, charts, allocation vs. target and refill progress.
 
 Runs entirely on **GitHub Actions + GitHub Pages + ntfy.sh**. There is no server, database or cost.
 
-| Regime | Drawdown vs. ATH | ACWI | World Small Cap | EUR infl.-linked bonds | Cash |
-|---|---|---|---|---|---|
-| Normal | < 20% | 70% | 10% | 10% | 10% |
-| Crisis | 20–40% (incl.) | 78% | 12% | 5% | 5% |
-| Escalation | > 40% | 85% | 15% | 0% | 0% |
+| Regime | ACWI | World Small Cap | EUR infl.-linked bonds | Cash |
+|---|---|---|---|---|
+| Normal (A) | 70% | 10% | 10% | 10% |
+| Crisis (B) | 78% | 12% | 5% | 5% |
+| Escalation (C) | 85% | 15% | 0% | 0% |
 
-The rules come from *Erfolgreich wissenschaftlich investieren*, p. 57, plus my own refill variant (below). The app only automates these rules. It gives no investment advice.
+### Regime changes
+
+From *Erfolgreich wissenschaftlich investieren* (2nd ed., p. 46, "Steuerung der Regimes in Krisen (vereinfacht)"):
+
+| Change | Condition (MSCI World daily close) |
+|---|---|
+| Normal → Crisis | more than **20% below the 3-year high** |
+| Crisis → Escalation | more than **25% below the Crisis start level** |
+| Escalation → Crisis | more than **50% above the 3-year low** |
+| Crisis → Normal | more than **25% above the Crisis start level** |
+
+- The **Crisis start level** (the "anchor") is the close on the day Crisis was entered, from Normal or from Escalation. Normal → Crisis → Escalation therefore means about −40% from the 3-year high (0.80 × 0.75). Escalation → Crisis → Normal means about +87.5% from the 3-year low (1.5 × 1.25).
+- The 3-year window is rolling: the last 1,096 calendar days including today.
+- All conditions are strict ("more than"), as in the book.
+- The regime is **path-dependent**. It's computed by replaying the full history since 1972 every day, so the live check and the backtest use the same engine. Since 1972 this gives 26 regime changes.
+- The book also names qualitative signals (volatility jumps, corporate-bond risk premiums). These are **not automated**. Only the price conditions are.
+- The allocations are my own, not the book's 80/20 / 90/10 / 100/0. The refill phase (below) is also my variant. The app only automates these rules. It gives no investment advice.
 
 ## How it works
 
-- **Daily close only.** The ATH is the highest close in the full history (since 1972). Intraday moves don't count.
-- **Every crossing alerts.** There is no buffer and no confirmation days. Today's regime is compared with the **last notified** regime in `data/state.json`, so missed days and skipped regimes (Normal ↔ Escalation) produce exactly one alert.
-- **First run:** sends "monitoring started" with the current regime and target.
+- **Daily close only.** Intraday moves don't count.
+- **Every regime change alerts.** There is no buffer and no confirmation days. Today's regime is compared with the **last notified** regime in `data/state.json`, so missed days and skipped regimes (Normal ↔ Escalation) produce exactly one alert.
+- **First run:** sends "monitoring started" with the current regime, target and the next trigger levels. If the rule engine changes (`RULES_VERSION` in `src/check.py`), the next run sends "monitoring restarted – rules changed" instead of a crossing alert.
 - **Downward crossing:** buy equities using bonds and cash. The alert lists the pp shifts and € amounts. The € figures are based on the `PORTFOLIO_VALUE_EUR` secret, which you update now and then.
 - **Upward crossing:** no sales. A **refill phase** starts: 100% of each monthly contribution goes to bonds and cash (50/50) until they are back at target.
   - On payday you get a reminder: the first run on or after `payday_day`.
@@ -93,11 +109,11 @@ cd docs && python3 -m http.server 8000            # dashboard at http://localhos
 ```
 src/check.py      entry point: fetch → classify → refill → notify → write state + dashboard data
 src/data.py       Yahoo fetch with retries, merge into data/history.csv, drop today's incomplete bar
-src/regime.py     ATH, drawdown, classification, transition deltas
+src/regime.py     regime state machine (3y high/low, Crisis anchor), trigger levels, transition deltas
 src/refill.py     refill phase: payday reminders, completion, 12-month cap
 src/notify.py     ntfy messages (Title/Priority/Tags/Click, PNG attachment)
 src/chart.py      notification/dashboard PNG
-src/backtest.py   regime events since 1972 for the dashboard
+src/backtest.py   regime events since 1972 (same engine) for the dashboard
 docs/             PWA (Chart.js from cdnjs), data.json + chart.png written daily
 ```
 

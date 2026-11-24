@@ -1,5 +1,5 @@
 // App shell cached; data.json and chart.png network-first so the dashboard is fresh but works offline.
-const CACHE = "regime-monitor-v1";
+const CACHE = "regime-monitor-v2";
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest",
   "icons/icon-192.png", "icons/icon-512.png",
   "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"];

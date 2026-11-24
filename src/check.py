@@ -1,4 +1,4 @@
-"""Daily entry point: fetch -> classify -> refill -> notify -> write state and dashboard data.
+"""Daily entry point: fetch -> regime path -> refill -> notify -> write state and dashboard data.
 
     python -m src.check [--dry-run] [--history-csv PATH] [--state PATH] [--today YYYY-MM-DD]
 """
@@ -14,14 +14,16 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import backtest, chart, notify, refill as rf
+from . import chart, notify, refill as rf
 from .data import fetch_history, load_history, save_history
-from .regime import ASSETS, LABEL, ath, classify, defensive_pct, drawdown, threshold_levels, transition
+from .regime import (ASSETS, LABEL, defensive_pct, regime_path, transition, trigger_levels,
+                     window_extreme_dates)
 
 ROOT = Path(__file__).resolve().parent.parent
 BERLIN = ZoneInfo("Europe/Berlin")
 NY = ZoneInfo("America/New_York")
 MAX_LIVE_EVENTS = 200
+RULES_VERSION = 2  # 2 = book rules (3y high/low + Crisis anchor)
 
 
 def expected_close_date(now: datetime) -> date:
@@ -35,7 +37,7 @@ def expected_close_date(now: datetime) -> date:
 
 
 def default_state() -> dict:
-    return {"last_notified_regime": None, "regime_since": None, "refill": rf.empty(),
+    return {"rules_version": None, "last_notified_regime": None, "regime_since": None, "refill": rf.empty(),
             "failed_fetches": 0, "last_close_date": None, "last_error": None, "events": []}
 
 
@@ -72,24 +74,38 @@ def evaluate(df: pd.DataFrame, cfg: dict, state: dict, today: date, fetch_ok: bo
     if df.empty:
         return msgs
 
-    th = cfg["thresholds"]
-    a = ath(df["close"])
-    ath_date = df.loc[df["close"].idxmax(), "date"]
-    last = df.iloc[-1]
-    dd = drawdown(float(last["close"]), a)
-    regime = classify(dd, th)
+    rules = cfg["rules"]
+    path = regime_path(df, rules)
+    last = path.df.iloc[-1]
+    regime = path.regime
+    prev_close_date = state.get("last_close_date")
     state["last_close_date"] = last["date"].strftime("%Y-%m-%d")
-    ctx = {"close": float(last["close"]), "date": state["last_close_date"], "ath": a,
-           "ath_date": ath_date.strftime("%Y-%m-%d"), "drawdown": dd, "regime": regime,
-           "levels": threshold_levels(a, th), "chart": chart_path}
+    ctx = market_context(path, rules)
+    ctx["chart"] = chart_path
+    # Rule triggers since the previous run (several if days were missed).
+    new_events = [e for e in path.events if prev_close_date is None or e["date"] > prev_close_date]
+    ctx["triggers"] = [f"{LABEL[e['from']]} -> {LABEL[e['to']]} on {e['date']}: {e['trigger']}" for e in new_events]
+    if not ctx["triggers"] and path.events:
+        e = path.events[-1]
+        ctx["triggers"] = [f"{LABEL[e['from']]} -> {LABEL[e['to']]} on {e['date']}: {e['trigger']}"]
 
     old = state.get("last_notified_regime")
-    tr = transition(old, regime, cfg["allocations"], cfg["portfolio_value_eur"])
-    if tr is None:
+    if old is not None and state.get("rules_version") != RULES_VERSION:
+        # Rules changed: report the regime under the new rules instead of a crossing alert.
+        msgs.append(notify.started(ctx, cfg, restarted=True))
+        state["last_notified_regime"] = regime
+        state["regime_since"] = path.since
+        state["rules_version"] = RULES_VERSION
+        tr = None
+        old = regime
+    else:
+        tr = transition(old, regime, cfg["allocations"], cfg["portfolio_value_eur"])
+    state["rules_version"] = RULES_VERSION
+    if old is None:
         msgs.append(notify.started(ctx, cfg))
         state["last_notified_regime"] = regime
-        state["regime_since"] = ctx["date"]
-    elif tr.direction != "none":
+        state["regime_since"] = path.since
+    elif tr is not None and tr.direction != "none":
         if tr.direction == "down":
             state["refill"] = rf.cancel(state["refill"])
             msgs.append(notify.regime_down(ctx, cfg, tr))
@@ -100,10 +116,11 @@ def evaluate(df: pd.DataFrame, cfg: dict, state: dict, today: date, fetch_ok: bo
             msgs.append(notify.regime_up(ctx, cfg, tr, {**state["refill"], "gap_eur": gap_eur,
                                                         "filled_eur": filled_eur}))
         state["events"].append({"date": ctx["date"], "from": tr.old, "to": tr.new, "direction": tr.direction,
-                                "drawdown": round(dd, 4), "close": round(ctx["close"], 2), "source": "live"})
+                                "trigger": "; ".join(e["trigger"] for e in new_events) or None,
+                                "close": round(ctx["close"], 2), "source": "live"})
         state["events"] = state["events"][-MAX_LIVE_EVENTS:]
         state["last_notified_regime"] = regime
-        state["regime_since"] = ctx["date"]
+        state["regime_since"] = path.since
 
     for ev in rf.step(state["refill"], today, cfg):
         if ev["type"] == "refill_reminder":
@@ -120,11 +137,32 @@ def evaluate(df: pd.DataFrame, cfg: dict, state: dict, today: date, fetch_ok: bo
     return msgs
 
 
+def market_context(path, rules: dict) -> dict:
+    last = path.df.iloc[-1]
+    hi_date, lo_date = window_extreme_dates(path.df, rules["window_years"])
+    high, low, close = float(last["high3y"]), float(last["low3y"]), float(last["close"])
+    return {"close": close, "date": last["date"].strftime("%Y-%m-%d"), "regime": path.regime,
+            "since": path.since, "high3y": high, "high3y_date": hi_date, "low3y": low, "low3y_date": lo_date,
+            "dd": 1 - close / high, "rise": close / low - 1, "anchor": path.anchor,
+            "levels": trigger_levels(path.regime, high, low, path.anchor, rules)}
+
+
+def segments(path) -> list:
+    """Run-length encoded regime path: [start_index, regime, anchor]."""
+    out, prev = [], None
+    for i, (r, a) in enumerate(zip(path.df["regime"], path.df["anchor"])):
+        key = (r, None if pd.isna(a) else round(float(a), 2))
+        if key != prev:
+            out.append([i, key[0], key[1]])
+            prev = key
+    return out
+
+
 def dashboard_data(df: pd.DataFrame, cfg: dict, state: dict, today: date) -> dict:
     """Public file: no EUR amounts, nothing that reveals portfolio size."""
-    th = cfg["thresholds"]
+    rules = cfg["rules"]
     out = {"generated": datetime.now(BERLIN).isoformat(timespec="seconds"), "today": today.isoformat(),
-           "index_name": cfg["index_name"], "thresholds": th, "allocations": cfg["allocations"],
+           "index_name": cfg["index_name"], "rules": rules, "allocations": cfg["allocations"],
            "asset_labels": cfg["asset_labels"], "assets": list(ASSETS),
            "normal_contribution_mode": cfg.get("normal_contribution_mode", "by_target"),
            "refill_cap_months": cfg["refill_cap_months"],
@@ -132,25 +170,28 @@ def dashboard_data(df: pd.DataFrame, cfg: dict, state: dict, today: date) -> dic
            "last_error": state.get("last_error")}
     if df.empty:
         return out
-    a = ath(df["close"])
-    last = df.iloc[-1]
-    dd = drawdown(float(last["close"]), a)
-    r = state.get("last_notified_regime") or classify(dd, th)
+    path = regime_path(df, rules)
+    ctx = market_context(path, rules)
+    r = path.regime
     cap = rf.cap_date(state["refill"], cfg["refill_cap_months"])
     out.update({
         "series": {"dates": df["date"].dt.strftime("%Y-%m-%d").tolist(),
                    "closes": [round(float(c), 2) for c in df["close"]]},
-        "close": round(float(last["close"]), 2), "close_date": last["date"].strftime("%Y-%m-%d"),
-        "ath": round(a, 2), "ath_date": df.loc[df["close"].idxmax(), "date"].strftime("%Y-%m-%d"),
-        "drawdown": round(dd, 5), "regime": r, "regime_label": LABEL[r],
-        "regime_since": state.get("regime_since"),
-        "levels": {k: round(v, 2) for k, v in threshold_levels(a, th).items()},
+        "regime_segments": segments(path),
+        "close": round(ctx["close"], 2), "close_date": ctx["date"],
+        "high3y": round(ctx["high3y"], 2), "high3y_date": ctx["high3y_date"],
+        "low3y": round(ctx["low3y"], 2), "low3y_date": ctx["low3y_date"],
+        "drawdown": round(ctx["dd"], 5), "rise": round(ctx["rise"], 5),
+        "anchor": round(ctx["anchor"], 2) if ctx["anchor"] else None,
+        "regime": r, "regime_label": LABEL[r], "regime_since": path.since,
+        "levels": [{**lv, "level": round(lv["level"], 2), "basis_level": round(lv["basis_level"], 2)}
+                   for lv in ctx["levels"]],
         "refill": {"active": state["refill"]["active"], "started": state["refill"]["started"],
                    "gap_pp": state["refill"]["gap_pp"], "cap_date": cap.isoformat() if cap else None,
                    "progress": round(rf.progress(state["refill"], cfg), 4) if state["refill"]["active"] else 0,
                    "months_left_estimate": rf.months_left(state["refill"], cfg) if state["refill"]["active"] else 0},
         "contribution_split_pct": rf.contribution_split_pct(cfg, state["refill"]["active"], r),
-        "events": {"live": state["events"], "backtest": backtest.regime_events(df, th)},
+        "events": {"live": state["events"], "backtest": [{**e, "source": "backtest"} for e in path.events]},
     })
     return out
 
@@ -216,8 +257,7 @@ def main(argv=None) -> int:
 
     chart_path = args.docs / "chart.png"
     if not df.empty:
-        tmp_regime = classify(drawdown(float(df["close"].iloc[-1]), ath(df["close"])), cfg["thresholds"])
-        chart.render(df, cfg["thresholds"], tmp_regime, chart_path)
+        chart.render(df, cfg["rules"], chart_path)
 
     msgs = evaluate(df, cfg, state, today, ok, err, chart_path if chart_path.exists() else None)
 

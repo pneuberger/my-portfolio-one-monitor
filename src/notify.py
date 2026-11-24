@@ -28,8 +28,22 @@ def pct(x: float) -> str:
 
 
 def _status(ctx: dict) -> str:
-    return (f"Drawdown: -{pct(ctx['drawdown'])} | Close: {ctx['close']:,.2f} ({ctx['date']})\n"
-            f"ATH: {ctx['ath']:,.2f} ({ctx['ath_date']})")
+    s = (f"Close: {ctx['close']:,.2f} ({ctx['date']})\n"
+         f"3y high: {ctx['high3y']:,.2f} ({ctx['high3y_date']}), {-ctx['dd'] * 100:+.1f}%\n"
+         f"3y low: {ctx['low3y']:,.2f} ({ctx['low3y_date']}), {ctx['rise'] * 100:+.1f}%")
+    if ctx.get("anchor"):
+        s += f"\nCrisis start level: {ctx['anchor']:,.2f}, {(ctx['close'] / ctx['anchor'] - 1) * 100:+.1f}%"
+    return s
+
+
+def _levels(ctx: dict) -> str:
+    parts = [f"{LABEL[lv['to']]} if close {lv['op']} {lv['level']:,.0f} "
+             f"({lv['pct'] * 100:+.0f}% vs {lv['basis']} {lv['basis_level']:,.0f})" for lv in ctx["levels"]]
+    return "Next: " + "; ".join(parts)
+
+
+def _triggers(ctx: dict) -> str:
+    return "Rule fired: " + " | ".join(ctx.get("triggers") or ["-"])
 
 
 def _target(cfg: dict, regime: str) -> str:
@@ -38,11 +52,12 @@ def _target(cfg: dict, regime: str) -> str:
     return "Target " + LABEL[regime] + ": " + ", ".join(f"{lab[k]} {a[k]}%" for k in ASSETS)
 
 
-def started(ctx: dict, cfg: dict) -> Message:
+def started(ctx: dict, cfg: dict, restarted: bool = False) -> Message:
     r = ctx["regime"]
-    return Message("started", f"Monitoring started - regime {LABEL[r]}",
-                   f"{_status(ctx)}\n{_target(cfg, r)}\n"
-                   f"Crisis below {ctx['levels']['crisis']:,.0f}, Escalation below {ctx['levels']['escalation']:,.0f}.",
+    title = (f"Monitoring restarted - rules changed - regime {LABEL[r]}" if restarted
+             else f"Monitoring started - regime {LABEL[r]}")
+    return Message("restarted" if restarted else "started", title,
+                   f"Regime {LABEL[r]} since {ctx['since']}.\n{_status(ctx)}\n{_target(cfg, r)}\n{_levels(ctx)}",
                    "default", "chart_with_upwards_trend")
 
 
@@ -56,8 +71,9 @@ def regime_down(ctx: dict, cfg: dict, tr) -> Message:
             lines.append(f"  {lab[a]}: {pp:+d} pp ({verb} {eur(abs(e))})")
     return Message(
         "regime_down", f"Regime {LABEL[tr.old]} -> {LABEL[tr.new]}: buy equities with bonds+cash",
-        f"{_status(ctx)}\nRule: shift bonds and cash into equities.\n" + "\n".join(lines) +
-        f"\n(EUR based on configured portfolio value {eur(cfg['portfolio_value_eur'])}.)\n{_target(cfg, tr.new)}",
+        f"{_triggers(ctx)}\n{_status(ctx)}\nRule: shift bonds and cash into equities.\n" + "\n".join(lines) +
+        f"\n(EUR based on configured portfolio value {eur(cfg['portfolio_value_eur'])}.)\n{_target(cfg, tr.new)}\n"
+        f"{_levels(ctx)}",
         "high", "rotating_light,chart_with_downwards_trend", ctx.get("chart"))
 
 
@@ -65,11 +81,11 @@ def regime_up(ctx: dict, cfg: dict, tr, refill: dict) -> Message:
     c = cfg["monthly_contribution_eur"]
     return Message(
         "regime_up", f"Regime {LABEL[tr.old]} -> {LABEL[tr.new]}: refill phase starts",
-        f"{_status(ctx)}\nRule: no sales. Send 100% of monthly contributions to bonds and cash "
+        f"{_triggers(ctx)}\n{_status(ctx)}\nRule: no sales. Send 100% of monthly contributions to bonds and cash "
         f"(50/50, {eur(c / 2)} each) until they are back at target.\n"
         f"Refill gap (estimate): {eur(refill['gap_eur'])} - about {-(-(refill['gap_eur'] - refill['filled_eur']) // c):.0f} months of contributions. "
         f"Safety net: sell the remainder after {cfg['refill_cap_months']} months "
-        f"(from {refill['started']}).\n{_target(cfg, tr.new)}",
+        f"(from {refill['started']}).\n{_target(cfg, tr.new)}\n{_levels(ctx)}",
         "high", "white_check_mark,chart_with_upwards_trend", ctx.get("chart"))
 
 
@@ -110,8 +126,8 @@ def weekly(ctx: dict, cfg: dict, refill: dict) -> Message:
     extra = ""
     if refill.get("active"):
         extra = f"\nRefill: {eur(refill['filled_eur'])} of {eur(refill['gap_eur'])}."
-    return Message("weekly", f"Weekly: regime {LABEL[ctx['regime']]}, -{pct(ctx['drawdown'])}",
-                   f"{_status(ctx)}\n{_target(cfg, ctx['regime'])}{extra}", "low", "calendar")
+    return Message("weekly", f"Weekly: regime {LABEL[ctx['regime']]}, {-ctx['dd'] * 100:+.1f}% vs 3y high",
+                   f"{_status(ctx)}\n{_target(cfg, ctx['regime'])}\n{_levels(ctx)}{extra}", "low", "calendar")
 
 
 def test_message(dashboard_url: str) -> Message:

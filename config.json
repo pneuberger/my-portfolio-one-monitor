@@ -1,9 +1,12 @@
 {
   "ticker": "^990100-USD-STRD",
   "index_name": "MSCI World (USD, price)",
-  "thresholds": {
-    "crisis": 0.2,
-    "escalation": 0.4
+  "rules": {
+    "window_years": 3,
+    "normal_to_crisis_drop_from_3y_high": 0.2,
+    "crisis_to_escalation_drop_from_anchor": 0.25,
+    "escalation_to_crisis_rise_from_3y_low": 0.5,
+    "crisis_to_normal_rise_from_anchor": 0.25
   },
   "allocations": {
     "normal": {
