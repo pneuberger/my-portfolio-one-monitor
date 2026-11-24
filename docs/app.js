@@ -164,6 +164,20 @@ function alpha(color, a) {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
+// Label only at real period boundaries: quarters (1Y), years (5Y), decades (Max).
+function axisLabel(labels, i) {
+  if (i === 0) return null;
+  const cur = labels[i], prev = labels[i - 1];
+  if (prefs.range === 1) {
+    if (cur.slice(0, 7) === prev.slice(0, 7)) return null;
+    const m = +cur.slice(5, 7);
+    return (m - 1) % 3 === 0 ? `${cur.slice(5, 7)}/${cur.slice(2, 4)}` : null;
+  }
+  if (cur.slice(0, 4) === prev.slice(0, 4)) return null;
+  const y = +cur.slice(0, 4);
+  return prefs.range === 0 && y % 10 !== 0 ? null : String(y);
+}
+
 function renderCharts() {
   if (!DATA.series || typeof Chart === "undefined") return;
   const r = sliceRange(prefs.range);
@@ -179,7 +193,7 @@ function renderCharts() {
     responsive: true, maintainAspectRatio: false, animation: false,
     interaction: { mode: "index", intersect: false },
     elements: { point: { radius: 0, hitRadius: 6 }, line: { borderWidth: 1.5 } },
-    scales: { x: { ticks: { maxTicksLimit: 5, maxRotation: 0, callback(v) { return this.getLabelForValue(v).slice(0, prefs.range === 1 ? 7 : 4); } }, grid: { display: false } } },
+    scales: { x: { ticks: { autoSkip: false, maxRotation: 0, callback: (v) => axisLabel(r.labels, v) }, grid: { display: false } } },
   };
 
   Object.values(charts).forEach((c) => c.destroy());
