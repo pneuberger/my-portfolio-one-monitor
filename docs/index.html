@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Regime Monitor</title>
+  <meta name="description" content="MSCI World drawdown regime monitor">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Regime Monitor</h1>
+    <span id="updated" class="muted"></span>
+  </header>
+
+  <section id="regime-card" class="card regime">
+    <div class="regime-head">
+      <span class="label">Current regime</span>
+      <span id="regime-name" class="regime-name">–</span>
+    </div>
+    <div class="big" id="dd">–</div>
+    <div class="muted" id="dd-sub">below all-time high</div>
+    <dl class="stats">
+      <div><dt>Close</dt><dd id="close">–</dd></div>
+      <div><dt>ATH</dt><dd id="ath">–</dd></div>
+      <div><dt>Crisis (−20%)</dt><dd id="lvl-crisis">–</dd></div>
+      <div><dt>Escalation (−40%)</dt><dd id="lvl-esc">–</dd></div>
+    </dl>
+    <div id="target" class="target"></div>
+    <div id="data-warning" class="warning" hidden></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Index</h2>
+      <div class="seg" role="tablist" id="range">
+        <button data-range="1">1Y</button>
+        <button data-range="5" class="on">5Y</button>
+        <button data-range="0">Max</button>
+      </div>
+    </div>
+    <div class="chart-box"><canvas id="chart-index"></canvas></div>
+    <h2 class="sub">Drawdown</h2>
+    <div class="chart-box small"><canvas id="chart-dd"></canvas></div>
+  </section>
+
+  <section class="card">
+    <h2>Holdings</h2>
+    <p class="muted small-text">Stored only on this device (localStorage), never uploaded.</p>
+    <form id="holdings" autocomplete="off"></form>
+    <div id="alloc"></div>
+  </section>
+
+  <section class="card">
+    <h2>Refill</h2>
+    <div id="refill"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Signal history</h2>
+      <div class="seg" id="hist-src">
+        <button data-src="live" class="on">Live</button>
+        <button data-src="backtest">Backtest</button>
+      </div>
+    </div>
+    <ul id="history" class="history"></ul>
+    <button id="hist-more" class="link" hidden>Show all</button>
+  </section>
+
+  <footer class="muted small-text">Automates the configured rules only. Not investment advice.</footer>
+</main>
+</body>
+</html>

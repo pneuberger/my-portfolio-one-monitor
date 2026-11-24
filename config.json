@@ -1,0 +1,41 @@
+{
+  "ticker": "^990100-USD-STRD",
+  "index_name": "MSCI World (USD, price)",
+  "thresholds": {
+    "crisis": 0.2,
+    "escalation": 0.4
+  },
+  "allocations": {
+    "normal": {
+      "acwi": 70,
+      "small_cap": 10,
+      "bonds": 10,
+      "cash": 10
+    },
+    "crisis": {
+      "acwi": 78,
+      "small_cap": 12,
+      "bonds": 5,
+      "cash": 5
+    },
+    "escalation": {
+      "acwi": 85,
+      "small_cap": 15,
+      "bonds": 0,
+      "cash": 0
+    }
+  },
+  "asset_labels": {
+    "acwi": "MSCI ACWI",
+    "small_cap": "MSCI World Small Cap",
+    "bonds": "EUR inflation-linked govt bonds",
+    "cash": "Cash"
+  },
+  "normal_contribution_mode": "by_target",
+  "payday_day": 1,
+  "refill_cap_months": 12,
+  "data_alert_after_failures": 2,
+  "data_alert_repeat_every": 5,
+  "weekly_summary": false,
+  "dashboard_url": "https://pneuberger.github.io/my-portfolio-one-monitor/"
+}
