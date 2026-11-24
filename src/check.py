@@ -8,7 +8,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -20,7 +20,18 @@ from .regime import ASSETS, LABEL, ath, classify, defensive_pct, drawdown, thres
 
 ROOT = Path(__file__).resolve().parent.parent
 BERLIN = ZoneInfo("Europe/Berlin")
+NY = ZoneInfo("America/New_York")
 MAX_LIVE_EVENTS = 200
+
+
+def expected_close_date(now: datetime) -> date:
+    """Most recent weekday whose US session has finished (18:00 New York). Ignores holidays,
+    so a holiday costs at most one 'stale' run, below the 2-run alert threshold."""
+    ny = now.astimezone(NY)
+    d = ny.date() if ny.hour >= 18 else ny.date() - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
 
 def default_state() -> dict:
@@ -181,6 +192,8 @@ def main(argv=None) -> int:
         return 2
 
     today = args.today or datetime.now(BERLIN).date()
+    # With --today, pretend we run at the scheduled time (06:15 UTC) on that day.
+    now = datetime.combine(args.today, time(6, 15), timezone.utc) if args.today else datetime.now(timezone.utc)
     state = {**default_state(), **load_json(args.state, {})}
     state["refill"] = {**rf.empty(), **state.get("refill", {})}
 
@@ -196,6 +209,10 @@ def main(argv=None) -> int:
             print(f"Fetch error: {res.error}", file=sys.stderr)
         elif not df.empty:
             save_history(df, args.history)
+
+    # A run is only a failure if the data is stale, not merely unchanged since an earlier run today.
+    if not err and not df.empty and df["date"].max().date() >= expected_close_date(now):
+        ok = True
 
     chart_path = args.docs / "chart.png"
     if not df.empty:

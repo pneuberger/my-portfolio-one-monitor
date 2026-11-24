@@ -221,3 +221,13 @@ def test_backtest_uses_running_ath():
     assert [(e["from"], e["to"]) for e in ev] == [
         ("normal", "crisis"), ("crisis", "escalation"), ("escalation", "crisis"),
         ("crisis", "normal"), ("normal", "crisis")]
+
+
+def test_expected_close_date():
+    from src.check import expected_close_date
+    utc = ZoneInfo("UTC")
+    assert expected_close_date(datetime(2026, 11, 24, 6, 15, tzinfo=utc)) == date(2026, 11, 23)  # Tue -> Mon
+    assert expected_close_date(datetime(2026, 11, 28, 6, 15, tzinfo=utc)) == date(2026, 11, 27)  # Sat -> Fri
+    assert expected_close_date(datetime(2026, 11, 24, 20, 30, tzinfo=utc)) == date(2026, 11, 23)  # session open
+    assert expected_close_date(datetime(2026, 11, 24, 23, 30, tzinfo=utc)) == date(2026, 11, 24)  # after close
+    assert expected_close_date(datetime(2026, 11, 30, 6, 15, tzinfo=utc)) == date(2026, 11, 27)  # Mon -> Fri
