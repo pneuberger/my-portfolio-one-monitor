@@ -1,0 +1,15 @@
+{
+  "last_notified_regime": "normal",
+  "regime_since": "2026-11-23",
+  "refill": {
+    "active": false,
+    "started": null,
+    "gap_pp": 0.0,
+    "paid_months": 0,
+    "last_reminder_month": null
+  },
+  "failed_fetches": 1,
+  "last_close_date": "2026-11-23",
+  "last_error": null,
+  "events": []
+}
